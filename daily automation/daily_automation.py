@@ -80,7 +80,7 @@ def export_and_archive(file):
 
 
 
-if __name__ = '__main__':
+if __name__ == '__main__':
     download_files(PATH, DATE)
     merged_file = merge_files(gunluk_yigim, PATH, FILE_TYPE)
     export_and_archive(merged_file)
