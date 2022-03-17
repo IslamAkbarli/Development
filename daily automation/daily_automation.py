@@ -2,13 +2,14 @@
 # coding: utf-8
 
 # Load library
-import win32com.client
-import pandas as pd
-import numpy as np
-import datetime
 import os
+import datetime
+import numpy as np
+import pandas as pd
+import win32com.client
 
 
+# Read excel file
 gunluk_yigim = pd.read_excel('Daily_eManat+.xlsx')
 
 # Specify file type and pathes
