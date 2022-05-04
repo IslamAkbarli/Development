@@ -5,6 +5,7 @@ import plotly
 import pickle
 import numpy as np
 import pandas as pd
+from typing import List, Any
 from functools import reduce
 
 # Used Models
@@ -16,7 +17,7 @@ from sklearn.ensemble import RandomForestClassifier
 
 # Validation and Evaluation
 from sklearn.model_selection import RepeatedStratifiedKFold
-from sklearn.metrics import roc_auc_score, f1_score
+from sklearn.metrics import roc_auc_score, f1_score, fbeta_score
 from sklearn.metrics import precision_score, recall_score
 
 # Optuna, hyperparameter optimization tool
@@ -31,7 +32,6 @@ from optuna.integration import XGBoostPruningCallback, LightGBMPruningCallback
 
 
 class HyperTune(object):
-
     """Third party class for Hyperparameter Optimization tool (based on Optuna)
     
     Constants
@@ -52,17 +52,35 @@ class HyperTune(object):
     objective(self, trial, X, y, current_model, n_splits, n_repeats, imbalance_ratio)
         Objective function to optimize given metric
         
-    fit(self, X, y, n_splits = 5, n_repeats = 2, n_trials = 10)
+    fit(self, X, y, n_splits = 5, n_repeats = 3, n_trials = 15)
         Fit the model to data matrix X and target
 
     Examples
     --------
+    To get different model parameters, you may use the following dictionary keys:
+        - 'lg': 'Logistic Regression'
+        - 'dt': 'Decision Tree'
+        - 'rf': 'Random Forest'
+        - 'xgb': 'XGBoost'
+        - 'lgb': 'LightGBM'
+    
+    Available evaluation metrics:
+        - 'f1'
+        - 'f_beta'
+        - 'precision'
+        - 'recall'
+        - 'accuracy'
+    
     >>>  # Create HyperTune object
-    >>>  test = HyperTune()
+    >>>  model_list = ['lg', 'dt', 'rf', 'xgb', 'lgb']
+    >>>  evaluation_metric = 'f1'
+    
+    >>>  test = HyperTune(model_list = model_list, 
+                          evaluation_metric = evaluation_metric)
 
     >>>  # Fit to run optuna for specified models
     >>>  test.fit(X_train, y_train, n_splits = 5, n_repeats = 2, 
-    ...           n_trials = 10)
+    ...           n_trials = 15)
 
     >>>  # Get model results as a dictionary 
     >>>  model_results = test.study_group
@@ -74,14 +92,7 @@ class HyperTune(object):
     >>>  all_params = test.best_params
     >>>  best_params = all_params['XGBoost']
          
-    '''  To get Different model parameters, you may use the following dictionary keys:
-        'Logistic Regression'
-        'Decision Tree'
-        'Random Forest'
-        'XGBoost'
-        'LightGBM'
-    '''
-    
+    >>>  # Train model with tuned parameters
     >>>  model = XGBClassifier(**best_params, random_state = 42)
     >>>  model.fit(X_train, y_train.values.ravel())
 
@@ -106,38 +117,54 @@ class HyperTune(object):
     >>> with open(pickle_name, 'rb') as f:
     >>>     test = pickle.load(f)
     """
-
+    
+    # Constants
     RANDOM_STATE = 42
     N_JOBS = -1
     
     # Dictionary to collect all model results
-    # Toggle comment to run desired models
     models_abbreviation = {
-                            'Logistic Regression': 'lg',
-#                             'Decision Tree': 'dt',
-#                             'Random Forest': 'rf',
-#                             'XGBoost': 'xgb',
-#                             'LightGBM': 'lgb'
+                            'lg': 'Logistic Regression', 
+                            'dt': 'Decision Tree', 
+                            'rf': 'Random Forest', 
+                            'xgb': 'XGBoost', 
+                            'lgb': 'LightGBM'
     }
     
-    def __init__(self, study_group = dict(), total_best_df = pd.DataFrame(), best_params = dict()):
+    def __init__(self, 
+                 model_list: List[str] = None, 
+                 evaluation_metric: str = None, 
+                 beta: float = None) -> None:
         """Constructs all the necessary attributes for collecting models and its parameters
         
         Parameters
         ----------
+        model_list : list, model name abbreviation(s) as a list
+        
+        evaluation_metric : str, requested evaluation metric
+        
+        beta : float, Determines the weight of recall in the combined score
+        
         study_group : dict, Possible array, list or DataFrame
 
         total_best_df : DataFrame, Best trial of each model
 
-        best_params : Tuned parameters of specified model
+        best_params : dict, Tuned parameters of specified model
+        
+        selected_models : dict, requested model name(s) and abbreviation(s)
         """
-        self.study_group = study_group
-        self.total_best_df = total_best_df
-        self.best_params = best_params
+        self.model_list = model_list or ['rf']
+        self.evaluation_metric = evaluation_metric or 'f1'
+        self.beta = beta or 1.0
+        self.study_group = dict()
+        self.total_best_df = pd.DataFrame()
+        self.best_params = dict()
+        self.selected_models = dict()
+        
 
         
     @staticmethod
-    def check_dataframe(y_train) :
+    def check_dataframe(y_train) -> pd.DataFrame:
         """Static method to convert target variable to DataFrame
 
         Parameters
@@ -157,13 +184,27 @@ class HyperTune(object):
     
     def create_model(self, trial, model_abbrev, imbalance_ratio):
         """ Selection of parameters based on specified model
+        
+        Parameters
+        ----------
+        trial : process of evaluating an objective function 
+            This object is passed to an objective function 
+            and provides interfaces to get parameter suggestion.
+            
+        model_abbrev : requested model abbreviation(s)
+        
+        imbalance_ratio : int, default=1
+            The total number of negative instances divided by total positive instances.
+            sum(negative instances) / sum(positive instances)
         """
         if model_abbrev == 'lg':
             
             lg_params = {
             
-                'C': trial.suggest_float('C', 0.001, 10.0),
-                'solver': trial.suggest_categorical("solver", ["sag", "saga", "liblinear", "newton-cg", "lbfgs"]),
+                'C': trial.suggest_float('C', 0.001, 10.0, log=True),
+                'solver': trial.suggest_categorical("solver", ["sag", "saga", "liblinear"]),
+                'tol': trial.suggest_float("tol", 0.0001, 0.01, log=True),
+                'fit_intercept': trial.suggest_categorical("fit_intercept", [True, False]),
                 'class_weight': trial.suggest_categorical('class_weight', ["balanced", None]),
                 'max_iter': 600,
                 'random_state': self.RANDOM_STATE,
@@ -201,6 +242,7 @@ class HyperTune(object):
                 'max_features': trial.suggest_categorical("max_features", ['auto', 'sqrt', 'log2']),
                 'class_weight': trial.suggest_categorical("class_weight", ['balanced', None]),
                 'random_state' : self.RANDOM_STATE
+#                 'ccp_alpha': trial.suggest_float('ccp_alpha', 0.0001, 1.0),
             } 
             
             model = DecisionTreeClassifier(**dt_params)
@@ -216,6 +258,7 @@ class HyperTune(object):
                 'class_weight': trial.suggest_categorical("class_weight", ['balanced','balanced_subsample', None]),
                 'random_state' : self.RANDOM_STATE,
                 'n_jobs' : self.N_JOBS
+#                 'ccp_alpha': trial.suggest_float('ccp_alpha', 0.0001, 1.0),
             } 
             
             model = RandomForestClassifier(**rf_params)
@@ -228,13 +271,13 @@ class HyperTune(object):
                 # L1 regularization weight.
                 'alpha': trial.suggest_float("alpha", 1e-4, 1.0, log=True),
                 # sampling ratio for training data.
-                'max_depth' : trial.suggest_int('max_depth', 2, 10), 
+                'max_depth' : trial.suggest_int('max_depth', 2, 10),
                 'subsample': trial.suggest_float("subsample", 0.2, 1.0),
                 'min_child_weight' : trial.suggest_int('min_child_weight', 1, 12),
                 'max_delta_step': trial.suggest_int('max_delta_step', 0, 10),
                 'learning_rate' : trial.suggest_loguniform('learning_rate', 0.005, 0.5),
                 'colsample_bytree' : trial.suggest_discrete_uniform('colsample_bytree', 0.1, 1, 0.01),
-                'scale_pos_weight' : trial.suggest_int("scale_pos_weight", 1, imbalance_ratio, step = imbalance_ratio-1),
+                'scale_pos_weight' : trial.suggest_categorical("scale_pos_weight", [ 1.0, imbalance_ratio]),
                 'use_label_encoder' : False,
                 'seed': self.RANDOM_STATE
                 #'nthread' : self.N_JOBS
@@ -263,7 +306,6 @@ class HyperTune(object):
                 'n_estimators': trial.suggest_int("n_estimators", 10, 500),
                 'objective': 'binary',
                 'reg_alpha': trial.suggest_float('reg_alpha', 1e-4, 1.0, log=True),
-                #'reg_lambda': trial.suggest_int('reg_lambda', 1e-2,1e-1),
                 'colsample_bytree': trial.suggest_float('colsample_bytree', 0.2,0.8),
                 'subsample': trial.suggest_float('subsample', 0.4,0.8),
                 'subsample_freq': trial.suggest_categorical('subsample_freq',[1,2]),
@@ -289,7 +331,7 @@ class HyperTune(object):
         return model
     
     
-    def objective(self, trial, X, y, current_model, n_splits, n_repeats, imbalance_ratio = 1)-> float:
+    def objective(self, trial, X, y, current_model, n_splits, n_repeats, imbalance_ratio = 1) -> float:
         """Objective function to optimize given metric.
 
         Parameters
@@ -324,6 +366,20 @@ class HyperTune(object):
         model = self.create_model(trial, current_model, imbalance_ratio)
         test_score = []
         
+        #  Requested evaluation metric
+        if self.evaluation_metric == 'f1':
+            metric = f1_score
+        elif self.evaluation_metric == 'f_beta':
+            metric = fbeta_score
+        elif self.evaluation_metric == 'precision':
+            metric = precision_score
+        elif self.evaluation_metric == 'recall':
+            metric = recall_score
+        elif self.evaluation_metric == 'accuracy':
+            metric = accuracy_score
+        else:
+            raise KeyError(f'"{self.evaluation_metric}" is not available in the module!')
+            
         # XGBoost modeling
         if current_model == 'xgb':
             rskf = RepeatedStratifiedKFold(n_splits=n_splits, n_repeats=n_repeats, random_state=self.RANDOM_STATE)
@@ -336,12 +392,17 @@ class HyperTune(object):
                     y_train,
                     eval_set=[(X_val, y_val)],
                     eval_metric="auc",
-                    early_stopping_rounds=100,
+                    early_stopping_rounds=10,
                     callbacks=[XGBoostPruningCallback(trial, "validation_0-auc")],
                 )
                 
                 y_val_pred = model.predict(X_val)
-                test_score.append(f1_score(y_val, y_val_pred))
+                
+                # Check if f_beta is used
+                if self.evaluation_metric == 'f_beta':
+                    test_score.append(metric(y_val, y_val_pred, beta = self.beta))
+                else:
+                    test_score.append(metric(y_val, y_val_pred))
             test_score_mean = reduce(lambda a, b: a+b, test_score)/len(test_score)
             
         # LGBM modeling
@@ -356,12 +417,17 @@ class HyperTune(object):
                     y_train,
                     eval_set=[(X_val, y_val)],
                     eval_metric="auc",
-                    early_stopping_rounds=100,
+                    early_stopping_rounds=10,
                     callbacks=[LightGBMPruningCallback(trial, "auc")],
                 )
                 
                 y_val_pred = model.predict(X_val)
-                test_score.append(f1_score(y_val, y_val_pred))
+
+                # Check if f_beta is used
+                if self.evaluation_metric == 'f_beta':
+                    test_score.append(metric(y_val, y_val_pred, beta = self.beta))
+                else:
+                    test_score.append(metric(y_val, y_val_pred))
             test_score_mean = reduce(lambda a, b: a+b, test_score)/len(test_score)
             
         else:
@@ -372,13 +438,18 @@ class HyperTune(object):
 
                 model.fit(X_train, y_train.ravel())
                 y_val_pred = model.predict(X_val)
-                test_score.append(f1_score(y_val, y_val_pred))
+
+                # Check if f_beta is used
+                if self.evaluation_metric == 'f_beta':
+                    test_score.append(metric(y_val, y_val_pred, beta = self.beta))
+                else:
+                    test_score.append(metric(y_val, y_val_pred))
             test_score_mean = reduce(lambda a, b: a+b, test_score)/len(test_score)
 
         return test_score_mean
     
     
-    def fit(self, X, y, n_splits = 5, n_repeats = 2, n_trials = 10):
+    def fit(self, X, y, n_splits = 5, n_repeats = 2, n_trials = 15):
         """Fit the model to data matrix X and target(s) y.
 
         Parameters
@@ -397,18 +468,23 @@ class HyperTune(object):
         
         n_trials : int, default=15
             The number of trials.
-        
         """
+        
+        # Check and select requested models to run
+        for model in self.model_list:
+            try:
+                self.selected_models[model] = self.models_abbreviation[model]
+            except KeyError as err:
+                raise KeyError(f'"{model}" does not exist in the model dictionary!')
+    
         # Change target type to dataframe
         y = self.check_dataframe(y)
         best_results_df = pd.DataFrame()
         self.total_best_df = pd.DataFrame()
         
-        # Imbalance ratio for class weight
-        imbalance_ratio = int(sum(y.values.ravel() == 0) / sum(y.values.ravel() == 1))
+        imbalance_ratio = sum(y.values.ravel() == 0) / sum(y.values.ravel() == 1)
 
-        for _, (model_name, model_abrv) in enumerate(self.models_abbreviation.items()):
-
+        for model_abrv, model_name in self.selected_models.items():
             print('*' * 40, '\n')
             print(model_name.upper(), '\n')
             print('*' * 40)
@@ -451,4 +527,4 @@ class HyperTune(object):
             print()
             print('*' * 40, '\n')
             
-        print('Hypertuning is Completed!')        
+        print('Hypertuning is Completed!')       
